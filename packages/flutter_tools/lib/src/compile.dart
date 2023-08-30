@@ -10,6 +10,7 @@ import 'package:package_config/package_config.dart';
 import 'package:process/process.dart';
 import 'package:usage/uuid/uuid.dart';
 
+import 'aop/aop_hook.dart';
 import 'artifacts.dart';
 import 'base/common.dart';
 import 'base/file_system.dart';
@@ -18,6 +19,15 @@ import 'base/logger.dart';
 import 'base/platform.dart';
 import 'build_info.dart';
 import 'convert.dart';
+
+/// use aop
+Future<List<String>> useAopIfNeed() async {
+  final List<String> aopParams = AopHook.useAopParams();
+  if (aopParams.isNotEmpty) {
+    await AopHook.initEnv();
+  }
+  return aopParams;
+}
 
 /// Opt-in changes to the dart compilers.
 const List<String> kDartCompilerExperiments = <String>[
@@ -280,7 +290,7 @@ class KernelCompiler {
       dartPluginRegistrantUri = packageConfig.toPackageUri(dartPluginRegistrantFileUri)?.toString() ??
         toMultiRootPath(dartPluginRegistrantFileUri, _fileSystemScheme, _fileSystemRoots, _fileSystem.path.separator == r'\');
     }
-
+    final List<String> params = await useAopIfNeed();
     final List<String> command = <String>[
       engineDartPath,
       '--disable-dart-dev',
@@ -293,6 +303,7 @@ class KernelCompiler {
         '-D$dartDefine',
       ...buildModeOptions(buildMode, dartDefines),
       if (trackWidgetCreation) '--track-widget-creation',
+      if (params.isNotEmpty) ...params,
       if (!linkPlatformKernelIn) '--no-link-platform',
       if (aot) ...<String>[
         '--aot',
@@ -741,6 +752,7 @@ class DefaultResidentCompiler implements ResidentCompiler {
       Artifact.frontendServerSnapshotForEngineDartSdk,
       platform: platform,
     );
+    final List<String> params = await useAopIfNeed();
     final List<String> command = <String>[
       _artifacts.getArtifactPath(Artifact.engineDartBinary, platform: platform),
       '--disable-dart-dev',
@@ -773,6 +785,7 @@ class DefaultResidentCompiler implements ResidentCompiler {
       ],
       ...buildModeOptions(buildMode, dartDefines),
       if (trackWidgetCreation) '--track-widget-creation',
+      if (params.isNotEmpty) ...params,
       for (final String root in fileSystemRoots) ...<String>[
         '--filesystem-root',
         root,
