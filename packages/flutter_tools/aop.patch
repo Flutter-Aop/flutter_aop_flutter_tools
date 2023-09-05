@@ -1,0 +1,270 @@
+From 4d08197f8403def5a34d3c1ff0003a0f2a4f49e9 Mon Sep 17 00:00:00 2001
+From: YangLang <yanglang116@gmail.com>
+Date: Wed, 30 Aug 2023 14:47:34 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?=E6=94=AF=E6=8C=81aop?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../flutter_tools/lib/src/aop/aop_hook.dart   | 123 ++++++++++++++++++
+ packages/flutter_tools/lib/src/compile.dart   |  15 ++-
+ 2 files changed, 137 insertions(+), 1 deletion(-)
+ create mode 100644 packages/flutter_tools/lib/src/aop/aop_hook.dart
+
+diff --git a/packages/flutter_tools/lib/src/aop/aop_hook.dart b/packages/flutter_tools/lib/src/aop/aop_hook.dart
+new file mode 100644
+index 0000000000..0c6fdbd644
+--- /dev/null
++++ b/packages/flutter_tools/lib/src/aop/aop_hook.dart
+@@ -0,0 +1,123 @@
++import 'package:crypto/crypto.dart';
++import 'package:package_config/package_config.dart';
++import 'package:yaml/yaml.dart';
++
++import '../artifacts.dart';
++import '../base/file_system.dart';
++import '../globals.dart' as global;
++
++const String PACKAGE_AOP = 'flutter_aop';
++const String FILE_MARK = 'aop_mark.txt';
++const String FILE_PACKAGE = '.packages';
++const String FILE_PACKAGE_JSON = 'package_config.json';
++const String FILE_PUBSPEC = 'pubspec.yaml';
++const String DIR_DART_TOOL = '.dart_tool';
++const String DIR_FRONTEND_SERVER = 'frontend_server';
++const String FILE_FRONTEND_SNAPSHOT = 'frontend_server.dart.snapshot';
++
++const List<String> FEATURES = <String>['constant_optimize'];
++
++class AopHook {
++  ///获取Package配置文件
++  static File? _getPackageConfigFile() {
++    final FileSystem fs = global.fs;
++    final String projectPath = fs.currentDirectory.absolute.path;
++    final File packageFile = fs.file(fs.path.join(projectPath, FILE_PACKAGE));
++    if (packageFile.existsSync()) {
++      return packageFile;
++    }
++    final File packageJsonFile = fs.file(fs.path.join(
++      projectPath,
++      DIR_DART_TOOL,
++      FILE_PACKAGE_JSON,
++    ));
++    if (packageJsonFile.existsSync()) {
++      return packageJsonFile;
++    }
++    return null;
++  }
++
++  ///获取支持AOP的FRONT_END_DIR
++  static Future<Directory> _findNewFrondEndDir() async {
++    final FileSystem fs = global.fs;
++    final File? packageFile = _getPackageConfigFile();
++    if (packageFile == null) {
++      throw Exception('please run `flutter pub get` first');
++    }
++    final PackageConfig packageConfig = await loadPackageConfig(packageFile);
++    final Package package = packageConfig.packages.firstWhere(
++      (Package package) => package.name == PACKAGE_AOP,
++      orElse: () => throw Exception('please add $PACKAGE_AOP plugin'),
++    );
++    final String pluginPath = package.root.toFilePath();
++    return fs.directory(fs.path.join(pluginPath, DIR_FRONTEND_SERVER));
++  }
++
++  ///获取标记文件
++  static File _getMarkFile() {
++    final FileSystem fs = global.fs;
++    final String snapshotPath = global.artifacts!.getArtifactPath(
++      Artifact.frontendServerSnapshotForEngineDartSdk,
++    );
++    final Directory parentDir = fs.file(snapshotPath).parent;
++    return parentDir.childFile(FILE_MARK);
++  }
++
++  ///替换原frontend_server.dart.snapshot
++  static Future<void> _copySnapshot(Directory newFrontEndDir) async {
++    final FileSystem fs = global.fs;
++    final File newSnapshot = newFrontEndDir.childFile(FILE_FRONTEND_SNAPSHOT);
++    final String newMd5 = md5.convert(newSnapshot.readAsBytesSync()).toString();
++    final String oldSnapshotPath = global.artifacts!.getArtifactPath(
++      Artifact.frontendServerSnapshotForEngineDartSdk,
++    );
++    fs.file(oldSnapshotPath).deleteSync();
++    newSnapshot.copySync(oldSnapshotPath);
++    final File markFile = _getMarkFile();
++    if (!markFile.existsSync()) {
++      markFile.createSync();
++    }
++    await markFile.writeAsString(newMd5);
++  }
++
++  static bool _needCopySnapShot(Directory newFrontEndDir) {
++    final File oldMarkFile = _getMarkFile();
++    if (!oldMarkFile.existsSync()) {
++      return true;
++    }
++    final String oldMarkContent = oldMarkFile.readAsStringSync();
++    final File newMarkFile = newFrontEndDir.childFile(FILE_MARK);
++    return oldMarkContent != newMarkFile.readAsStringSync();
++  }
++
++  ///初始化
++  static Future<void> initEnv() async {
++    final Directory newFrontEndDir = await _findNewFrondEndDir();
++    final bool needCopy = _needCopySnapShot(newFrontEndDir);
++    global.logger.printStatus('[aop] copy frontend: $needCopy');
++    if (needCopy) {
++      await _copySnapshot(newFrontEndDir);
++    }
++  }
++
++  ///当前项目是否开启AOP
++  static List<String> useAopParams() {
++    final FileSystem fs = global.fs;
++    final String projectPath = fs.currentDirectory.absolute.path;
++    final String pubspecPath = fs.path.join(projectPath, FILE_PUBSPEC);
++    final String yamlContent = fs.file(pubspecPath).readAsStringSync();
++    final YamlMap rootYaml = loadYaml(yamlContent) as YamlMap;
++    final List<String> params = <String>[];
++    final dynamic aopNode = rootYaml['aop'];
++    if (aopNode != null && aopNode is YamlMap) {
++      for (final String feature in FEATURES) {
++        final dynamic status = aopNode[feature];
++        if (status != null && status == true) {
++          params.add('--$feature');
++        }
++      }
++    }
++    global.logger.printStatus('[aop] param: ${params.join(',')}');
++    return params;
++  }
++}
+diff --git a/packages/flutter_tools/lib/src/compile.dart b/packages/flutter_tools/lib/src/compile.dart
+index 5b1422b8ba..20aae80aa3 100644
+--- a/packages/flutter_tools/lib/src/compile.dart
++++ b/packages/flutter_tools/lib/src/compile.dart
+@@ -10,6 +10,7 @@ import 'package:package_config/package_config.dart';
+ import 'package:process/process.dart';
+ import 'package:usage/uuid/uuid.dart';
+ 
++import 'aop/aop_hook.dart';
+ import 'artifacts.dart';
+ import 'base/common.dart';
+ import 'base/file_system.dart';
+@@ -19,6 +20,15 @@ import 'base/platform.dart';
+ import 'build_info.dart';
+ import 'convert.dart';
+ 
++/// use aop
++Future<List<String>> useAopIfNeed() async {
++  final List<String> aopParams = AopHook.useAopParams();
++  if (aopParams.isNotEmpty) {
++    await AopHook.initEnv();
++  }
++  return aopParams;
++}
++
+ /// Opt-in changes to the dart compilers.
+ const List<String> kDartCompilerExperiments = <String>[
+ ];
+@@ -280,7 +290,7 @@ class KernelCompiler {
+       dartPluginRegistrantUri = packageConfig.toPackageUri(dartPluginRegistrantFileUri)?.toString() ??
+         toMultiRootPath(dartPluginRegistrantFileUri, _fileSystemScheme, _fileSystemRoots, _fileSystem.path.separator == r'\');
+     }
+-
++    final List<String> params = await useAopIfNeed();
+     final List<String> command = <String>[
+       engineDartPath,
+       '--disable-dart-dev',
+@@ -293,6 +303,7 @@ class KernelCompiler {
+         '-D$dartDefine',
+       ...buildModeOptions(buildMode, dartDefines),
+       if (trackWidgetCreation) '--track-widget-creation',
++      if (params.isNotEmpty) ...params,
+       if (!linkPlatformKernelIn) '--no-link-platform',
+       if (aot) ...<String>[
+         '--aot',
+@@ -741,6 +752,7 @@ class DefaultResidentCompiler implements ResidentCompiler {
+       Artifact.frontendServerSnapshotForEngineDartSdk,
+       platform: platform,
+     );
++    final List<String> params = await useAopIfNeed();
+     final List<String> command = <String>[
+       _artifacts.getArtifactPath(Artifact.engineDartBinary, platform: platform),
+       '--disable-dart-dev',
+@@ -773,6 +785,7 @@ class DefaultResidentCompiler implements ResidentCompiler {
+       ],
+       ...buildModeOptions(buildMode, dartDefines),
+       if (trackWidgetCreation) '--track-widget-creation',
++      if (params.isNotEmpty) ...params,
+       for (final String root in fileSystemRoots) ...<String>[
+         '--filesystem-root',
+         root,
+-- 
+2.33.0
+
+
+From af123c9844946caf3851ea746f93d1c9a757735c Mon Sep 17 00:00:00 2001
+From: YangLang <yanglang116@gmail.com>
+Date: Tue, 5 Sep 2023 22:52:16 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?=E8=B0=83=E6=95=B4aop=E6=96=B9=E5=BC=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../flutter_tools/lib/src/aop/aop_hook.dart   | 24 ++++++++++++-------
+ 1 file changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/packages/flutter_tools/lib/src/aop/aop_hook.dart b/packages/flutter_tools/lib/src/aop/aop_hook.dart
+index 0c6fdbd644..7279982dac 100644
+--- a/packages/flutter_tools/lib/src/aop/aop_hook.dart
++++ b/packages/flutter_tools/lib/src/aop/aop_hook.dart
+@@ -1,3 +1,5 @@
++import 'dart:convert';
++
+ import 'package:crypto/crypto.dart';
+ import 'package:package_config/package_config.dart';
+ import 'package:yaml/yaml.dart';
+@@ -15,8 +17,6 @@ const String DIR_DART_TOOL = '.dart_tool';
+ const String DIR_FRONTEND_SERVER = 'frontend_server';
+ const String FILE_FRONTEND_SNAPSHOT = 'frontend_server.dart.snapshot';
+ 
+-const List<String> FEATURES = <String>['constant_optimize'];
+-
+ class AopHook {
+   ///获取Package配置文件
+   static File? _getPackageConfigFile() {
+@@ -108,14 +108,20 @@ class AopHook {
+     final String yamlContent = fs.file(pubspecPath).readAsStringSync();
+     final YamlMap rootYaml = loadYaml(yamlContent) as YamlMap;
+     final List<String> params = <String>[];
+-    final dynamic aopNode = rootYaml['aop'];
+-    if (aopNode != null && aopNode is YamlMap) {
+-      for (final String feature in FEATURES) {
+-        final dynamic status = aopNode[feature];
+-        if (status != null && status == true) {
+-          params.add('--$feature');
+-        }
++    final dynamic enableAopAnno = rootYaml['aop-annotation'];
++    if (enableAopAnno == true) {
++      params.add('--aop-annotation');
++    }
++    final dynamic aopConstantOpt = rootYaml['aop-constant-optimize'];
++    if (aopConstantOpt is YamlList && aopConstantOpt.isNotEmpty) {
++      final List<String> packageList = <String>[];
++      for (final YamlNode node in aopConstantOpt.nodes) {
++        final String packageName = (node.value as String).trim();
++        packageList.add(packageName);
+       }
++      final List<int> bytes = utf8.encode(packageList.join('#'));
++      final String encodedStr = base64Encode(bytes);
++      params.add('--aop-constant-optimize=$encodedStr');
+     }
+     global.logger.printStatus('[aop] param: ${params.join(',')}');
+     return params;
+-- 
+2.33.0
+
