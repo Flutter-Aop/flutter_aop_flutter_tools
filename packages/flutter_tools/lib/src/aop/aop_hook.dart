@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:crypto/crypto.dart';
 import 'package:package_config/package_config.dart';
 import 'package:yaml/yaml.dart';
@@ -14,8 +16,6 @@ const String FILE_PUBSPEC = 'pubspec.yaml';
 const String DIR_DART_TOOL = '.dart_tool';
 const String DIR_FRONTEND_SERVER = 'frontend_server';
 const String FILE_FRONTEND_SNAPSHOT = 'frontend_server.dart.snapshot';
-
-const List<String> FEATURES = <String>['constant_optimize'];
 
 class AopHook {
   ///获取Package配置文件
@@ -108,14 +108,20 @@ class AopHook {
     final String yamlContent = fs.file(pubspecPath).readAsStringSync();
     final YamlMap rootYaml = loadYaml(yamlContent) as YamlMap;
     final List<String> params = <String>[];
-    final dynamic aopNode = rootYaml['aop'];
-    if (aopNode != null && aopNode is YamlMap) {
-      for (final String feature in FEATURES) {
-        final dynamic status = aopNode[feature];
-        if (status != null && status == true) {
-          params.add('--$feature');
-        }
+    final dynamic enableAopAnno = rootYaml['aop-annotation'];
+    if (enableAopAnno == true) {
+      params.add('--aop-annotation');
+    }
+    final dynamic aopConstantOpt = rootYaml['aop-constant-optimize'];
+    if (aopConstantOpt is YamlList && aopConstantOpt.isNotEmpty) {
+      final List<String> packageList = <String>[];
+      for (final YamlNode node in aopConstantOpt.nodes) {
+        final String packageName = (node.value as String).trim();
+        packageList.add(packageName);
       }
+      final List<int> bytes = utf8.encode(packageList.join('#'));
+      final String encodedStr = base64Encode(bytes);
+      params.add('--aop-constant-optimize=$encodedStr');
     }
     global.logger.printStatus('[aop] param: ${params.join(',')}');
     return params;
